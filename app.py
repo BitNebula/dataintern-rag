@@ -61,7 +61,8 @@ def fetch_files_from_drive(folder_id, api_key):
     url = f"https://www.googleapis.com/drive/v3/files?q='{folder_id}'+in+parents&key={api_key}"
     try:
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req) as response:
+        # FIX: Added timeout to prevent infinite network hanging
+        with urllib.request.urlopen(req, timeout=15) as response:
             data = json.loads(response.read().decode())
             return data.get('files', [])
     except Exception as e:
@@ -72,7 +73,8 @@ def download_drive_file(file_id, api_key):
     url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media&key={api_key}"
     try:
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req) as response:
+        # FIX: Added timeout to prevent infinite network hanging
+        with urllib.request.urlopen(req, timeout=15) as response:
             return response.read()
     except Exception:
         return None
@@ -113,58 +115,72 @@ def parse_file_content(file_name, file_bytes):
 
 # --- EXECUTE INGESTION PIPELINE ---
 if fetch_btn:
-    with st.spinner("Accessing Google Drive & compiling documents..."):
+    # First just fetch the file list
+    with st.spinner("Connecting to Google Drive..."):
         files = fetch_files_from_drive(DRIVE_FOLDER_ID, GOOGLE_DRIVE_API_KEY)
-        if not files:
-            st.sidebar.warning("No files found or folder is not public.")
-        else:
-            all_chunks = []
-            processed_names = []
+        
+    if not files:
+        st.sidebar.warning("No files found or folder is not public.")
+    else:
+        all_chunks = []
+        processed_names = []
+        
+        # FIX: Create a live status text so user knows it's not frozen
+        status_text = st.empty()
+        
+        for f in files:
+            f_name, f_id = f['name'], f['id']
+            status_text.info(f"Downloading file: {f_name}...")
             
-            for f in files:
-                f_name, f_id = f['name'], f['id']
-                f_bytes = download_drive_file(f_id, GOOGLE_DRIVE_API_KEY)
-                if f_bytes:
-                    file_chunks = parse_file_content(f_name, f_bytes)
-                    all_chunks.extend(file_chunks)
-                    processed_names.append(f_name)
+            f_bytes = download_drive_file(f_id, GOOGLE_DRIVE_API_KEY)
+            if f_bytes:
+                status_text.info(f"Parsing content: {f_name}...")
+                file_chunks = parse_file_content(f_name, f_bytes)
+                all_chunks.extend(file_chunks)
+                processed_names.append(f_name)
+        
+        if all_chunks:
+            status_text.info("Generating AI embeddings (This might take a moment)...")
+            st.session_state.vectorstore = []
             
-            if all_chunks:
-                with st.spinner("Generating embeddings (Handling API rate limits safely)..."):
-                    st.session_state.vectorstore = []
-                    
-                    # FIX: Dynamically find the exact embedding model your API key supports
-                    try:
-                        valid_models = [m.name for m in genai.list_models() if 'embedContent' in m.supported_generation_methods]
-                        if valid_models:
-                            st.session_state.embed_model = valid_models[0]
-                    except Exception:
-                        pass # Fallback to default if list_models fails
+            # Dynamically find the exact embedding model your API key supports
+            try:
+                valid_models = [m.name for m in genai.list_models() if 'embedContent' in m.supported_generation_methods]
+                if valid_models:
+                    st.session_state.embed_model = valid_models[0]
+            except Exception:
+                pass # Fallback to default if list_models fails
 
-                    # FIX: Process chunks with a retry backoff to prevent API crash
-                    for chunk in all_chunks:
-                        for attempt in range(3):
-                            try:
-                                emb = genai.embed_content(
-                                    model=st.session_state.embed_model,
-                                    content=chunk['text'],
-                                    task_type="retrieval_document"
-                                )['embedding']
-                                
-                                st.session_state.vectorstore.append({
-                                    "vector": emb,
-                                    "text": chunk['text'],
-                                    "source": chunk['source']
-                                })
-                                break # Exit the retry loop if successful
-                            except Exception as e:
-                                if attempt == 2:
-                                    pass # Skip this chunk on 3rd failure instead of crashing app
-                                else:
-                                    time.sleep(1.5) # Wait before retry to clear rate limits
+            # Process chunks with a retry backoff to prevent API crash
+            for i, chunk in enumerate(all_chunks):
+                if i % 10 == 0: # Update UI every 10 chunks
+                     status_text.info(f"Embedding chunk {i+1} of {len(all_chunks)}...")
+                for attempt in range(3):
+                    try:
+                        emb = genai.embed_content(
+                            model=st.session_state.embed_model,
+                            content=chunk['text'],
+                            task_type="retrieval_document"
+                        )['embedding']
                         
-                st.session_state.processed_files = processed_names
-                st.rerun()
+                        st.session_state.vectorstore.append({
+                            "vector": emb,
+                            "text": chunk['text'],
+                            "source": chunk['source']
+                        })
+                        break # Exit the retry loop if successful
+                    except Exception as e:
+                        if attempt == 2:
+                            pass # Skip this chunk on 3rd failure instead of crashing app
+                        else:
+                            time.sleep(1.5) # Wait before retry to clear rate limits
+            
+            status_text.success("Ingestion complete!")
+            time.sleep(1) # Let user see success message before reload
+            status_text.empty() # Clear the status box
+            
+        st.session_state.processed_files = processed_names
+        st.rerun()
 
 # --- CHAT INTERFACE & ENGINE ---
 for message in st.session_state.messages:
@@ -182,7 +198,7 @@ if user_query := st.chat_input("Ask DataIntern about your business logs..."):
     if st.session_state.vectorstore:
         context_str = ""
         
-        # FIX: Generate query embedding safely with backoff
+        # Generate query embedding safely with backoff
         query_embedding = None
         for attempt in range(3):
             try:
