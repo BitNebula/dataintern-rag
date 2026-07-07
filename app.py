@@ -38,23 +38,23 @@ if "processed_files" not in st.session_state:
 def embed_text_safe(text, task_type):
     """Tries primary embedding model, falls back to legacy if server rejects it."""
     for model_name in ["models/text-embedding-004", "models/embedding-001"]:
-        for attempt in range(5):  # Increased to 5 attempts
+        for attempt in range(4):  
             try:
                 return genai.embed_content(model=model_name, content=text, task_type=task_type)['embedding']
             except Exception:
-                time.sleep(4) # Wait 4 seconds between attempts to safely clear rate limits
-    raise Exception("Google AI API free quota reached. Please wait 30 seconds and try again.")
+                time.sleep(16) # Wait 16s (4 attempts = 64s) to guarantee the 1-minute quota resets
+    raise Exception("Google AI API free quota reached. Please wait 1 minute and try again.")
 
 def chat_safe(prompt):
     """Tries the fastest chat model, falls back to stable legacy if needed."""
     for model_name in ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]:
-        for attempt in range(5):  # Increased to 5 attempts
+        for attempt in range(4): 
             try:
                 model = genai.GenerativeModel(model_name)
                 return model.generate_content(prompt).text
             except Exception:
-                time.sleep(5) # Wait 5 seconds between attempts to safely clear rate limits
-    raise Exception("Google AI API free quota reached. Please wait 30 seconds and try again.")
+                time.sleep(16) # Wait 16s (4 attempts = 64s) to guarantee the 1-minute quota resets
+    raise Exception("Google AI API free quota reached. Please wait 1 minute and try again.")
 
 def cosine_similarity(a, b):
     norm = np.linalg.norm(a) * np.linalg.norm(b)
@@ -142,6 +142,7 @@ if not st.session_state.data_loaded:
                 try:
                     emb = embed_text_safe(chunk['text'], "retrieval_document")
                     st.session_state.vectorstore.append({"vector": emb, "text": chunk['text'], "source": chunk['source']})
+                    time.sleep(4) # Intentional pace: 1 request every 4 seconds ensures we strictly obey 15 RPM
                 except Exception:
                     pass # Skip chunk gracefully if API completely rejects
                 
