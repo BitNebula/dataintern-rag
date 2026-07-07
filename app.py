@@ -58,30 +58,6 @@ with st.sidebar:
 def cosine_similarity(a, b):
     return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
-# --- GOOGLE DRIVE FILE INGESTION ---
-def fetch_files_from_drive(folder_id, api_key):
-    url = f"https://www.googleapis.com/drive/v3/files?q='{folder_id}'+in+parents&key={api_key}"
-    try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=15) as response:
-            data = json.loads(response.read().decode())
-            return data.get('files', [])
-    except Exception as e:
-        return []
-
-def download_drive_file(file_id, api_key):
-    url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media&key={api_key}"
-    try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=15) as response:
-            return response.read(), None
-    except urllib.error.HTTPError as e:
-        if e.code == 403:
-            return None, "HTTP 403: Google native Docs/Sheets cannot be downloaded as raw bytes. Please upload standard PDFs or CSVs."
-        return None, f"HTTP Error {e.code}"
-    except Exception as e:
-        return None, str(e)
-
 # --- PARSING ENGINE FOR MULTI-FORMATS ---
 def parse_file_content(file_name, file_bytes):
     chunks = []
@@ -118,39 +94,51 @@ def parse_file_content(file_name, file_bytes):
         st.warning(f"Could not parse {file_name}: {e}")
     return chunks
 
-# --- EXECUTE INGESTION PIPELINE ---
-if fetch_btn:
-    # FIX: Use a visual status container to show step-by-step progress
+# --- SIDEBAR CONFIGURATION (UPDATED FOR DIRECT UPLOAD) ---
+with st.sidebar:
+    st.header("⚙️ Configuration Panel")
+    st.success("✅ Secure AI Core Initialized.")
+    
+    # NEW: Streamlit File Uploader
+    uploaded_files = st.file_uploader(
+        "Upload Business Data", 
+        type=['csv', 'xlsx', 'pdf', 'docx', 'json'],
+        accept_multiple_files=True
+    )
+    
+    process_btn = st.button("Ingest Uploaded Files", type="primary", disabled=not uploaded_files)
+
+    st.markdown("---")
+    st.markdown("### 📋 System Status")
+    if st.session_state.processed_files:
+        st.success(f"Ingested {len(st.session_state.processed_files)} files.")
+        for f in st.session_state.processed_files:
+            st.text(f"• {f}")
+    else:
+        st.info("No documents currently loaded into Vector Store.")
+
+# --- EXECUTE INGESTION PIPELINE (UPDATED FOR DIRECT UPLOAD) ---
+if process_btn and uploaded_files:
     with st.status("🚀 Processing Data Pipeline...", expanded=True) as status:
-        st.write("📡 Connecting to Google Drive...")
-        files = fetch_files_from_drive(DRIVE_FOLDER_ID, GOOGLE_DRIVE_API_KEY)
-        
-        if not files:
-            status.update(label="❌ No files found or folder is restricted.", state="error")
-            st.stop()
-            
         all_chunks = []
         processed_names = []
         
-        for f in files:
-            f_name, f_id = f['name'], f['id']
-            st.write(f"📥 Fetching: {f_name}...")
+        for file in uploaded_files:
+            f_name = file.name
+            st.write(f"⚙️ Parsing content for: {f_name}")
             
-            f_bytes, error_msg = download_drive_file(f_id, GOOGLE_DRIVE_API_KEY)
+            # Read bytes directly from the uploaded file
+            f_bytes = file.getvalue()
             
-            if f_bytes:
-                st.write(f"⚙️ Parsing content for: {f_name}")
-                file_chunks = parse_file_content(f_name, f_bytes)
-                if file_chunks:
-                    all_chunks.extend(file_chunks)
-                    processed_names.append(f_name)
-                else:
-                    st.write(f"⚠️ No readable text found in {f_name}")
+            file_chunks = parse_file_content(f_name, f_bytes)
+            if file_chunks:
+                all_chunks.extend(file_chunks)
+                processed_names.append(f_name)
             else:
-                st.error(f"❌ Failed to read {f_name}: {error_msg}")
+                st.write(f"⚠️ No readable text found in {f_name}")
         
         if not all_chunks:
-            status.update(label="❌ Pipeline Failed: No valid data could be extracted from any files.", state="error")
+            status.update(label="❌ Pipeline Failed: No valid data could be extracted.", state="error")
             st.stop()
             
         st.write(f"🧠 Generating AI Embeddings for {len(all_chunks)} data chunks...")
