@@ -231,7 +231,16 @@ if user_query := st.chat_input("Ask DataIntern to chart your data..."):
                     # DYNAMIC MODEL SELECTION: Automatically grab the best available chat model for your specific API key
                     chat_model_name = get_best_model(method='generateContent')
                     model = genai.GenerativeModel(chat_model_name)
-                    response = model.generate_content([system_prompt, f"User Query: {user_query}"])
+                    
+                    # --- FIX: SILENT RATE LIMIT PROTECTION FOR RESPONSE ---
+                    response = None
+                    for attempt in range(4):
+                        try:
+                            response = model.generate_content([system_prompt, f"User Query: {user_query}"])
+                            break
+                        except Exception as e:
+                            time.sleep(3) # Wait and retry if Google limits us
+                            if attempt == 3: raise e
                     
                     # BULLETPROOF JSON PARSING
                     raw = response.text.strip()
