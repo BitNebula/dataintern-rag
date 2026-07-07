@@ -127,27 +127,37 @@ if fetch_btn:
                     processed_names.append(f_name)
             
             if all_chunks:
-                with st.spinner("Generating embeddings..."):
-                    texts = [c['text'] for c in all_chunks]
-                    # FIX: Switched to universally supported legacy embedding model
-                    response = genai.embed_content(
-                        model="models/embedding-001",
-                        content=texts,
-                        task_type="retrieval_document"
-                    )
-                    
+                with st.spinner("Generating embeddings (Processing chunks safely)..."):
                     st.session_state.vectorstore = []
-                    for i, embedding in enumerate(response['embedding']):
+                    
+                    # FIX: Loop chunks one-by-one to bypass batch endpoint errors
+                    active_model = "models/text-embedding-004"
+                    for chunk in all_chunks:
+                        try:
+                            emb = genai.embed_content(
+                                model=active_model,
+                                content=chunk['text'],
+                                task_type="retrieval_document"
+                            )['embedding']
+                        except Exception:
+                            # If new model fails, gracefully degrade to legacy model
+                            active_model = "models/embedding-001"
+                            emb = genai.embed_content(
+                                model=active_model,
+                                content=chunk['text'],
+                                task_type="retrieval_document"
+                            )['embedding']
+                            
                         st.session_state.vectorstore.append({
-                            "vector": embedding,
-                            "text": all_chunks[i]['text'],
-                            "source": all_chunks[i]['source']
+                            "vector": emb,
+                            "text": chunk['text'],
+                            "source": chunk['source']
                         })
+                        
                 st.session_state.processed_files = processed_names
                 st.rerun()
 
 # --- CHAT INTERFACE & ENGINE ---
-# Render historical turns
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
@@ -162,14 +172,21 @@ if user_query := st.chat_input("Ask DataIntern about your business logs..."):
     
     if st.session_state.vectorstore:
         context_str = ""
-        # FIX: Switched to universally supported legacy embedding model
-        query_embedding = genai.embed_content(
-            model="models/embedding-001",
-            content=user_query,
-            task_type="retrieval_query"
-        )['embedding']
         
-        # Rank entries
+        # FIX: Robust fallback for Query Embedding
+        try:
+            query_embedding = genai.embed_content(
+                model="models/text-embedding-004",
+                content=user_query,
+                task_type="retrieval_query"
+            )['embedding']
+        except Exception:
+            query_embedding = genai.embed_content(
+                model="models/embedding-001",
+                content=user_query,
+                task_type="retrieval_query"
+            )['embedding']
+        
         scored = [(cosine_similarity(query_embedding, item["vector"]), item) for item in st.session_state.vectorstore]
         scored.sort(key=lambda x: x[0], reverse=True)
         top_k = scored[:15]
