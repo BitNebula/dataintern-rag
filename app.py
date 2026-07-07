@@ -16,7 +16,7 @@ import re
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="DataIntern - RAG CRM Assistant", layout="wide")
 st.title("💼 DataIntern: RAG Chatbot for CRM & Business Data")
-st.caption("Secure Multi-Format Ingestion & Instant Visualization Engine")
+st.caption("Google Drive Multi-Format Ingestion & Visualization Engine")
 
 # --- SECURE SECRETS LOADING ---
 try:
@@ -36,13 +36,11 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 if "processed_files" not in st.session_state:
     st.session_state.processed_files = []
-if "embed_model" not in st.session_state:
-    st.session_state.embed_model = "models/text-embedding-004" # Default fallback
 
 # --- SIDEBAR CONFIGURATION ---
 with st.sidebar:
     st.header("⚙️ Configuration Panel")
-    st.success("✅ API Keys securely loaded from backend.")
+    st.success("✅ Secure AI Core Initialized.")
     fetch_btn = st.button("Ingest Files From Drive", type="primary")
 
     st.markdown("---")
@@ -56,7 +54,49 @@ with st.sidebar:
 
 # --- HELPERS: PURE PYTHON VECTOR MATH ---
 def cosine_similarity(a, b):
-    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+    # Prevent division by zero
+    norm_a, norm_b = np.linalg.norm(a), np.linalg.norm(b)
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return np.dot(a, b) / (norm_a * norm_b)
+
+def chunk_text(text, source_name, max_words=500):
+    chunks = []
+    words = text.split()
+    for i in range(0, len(words), max_words):
+        chunk_str = " ".join(words[i:i+max_words])
+        chunks.append({"text": chunk_str, "source": source_name})
+    return chunks
+
+# --- GOOGLE DRIVE FILE INGESTION ---
+def fetch_files_from_drive(folder_id, api_key):
+    url = f"https://www.googleapis.com/drive/v3/files?q='{folder_id}'+in+parents&key={api_key}"
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=15) as response:
+            data = json.loads(response.read().decode())
+            return data.get('files', [])
+    except Exception as e:
+        return []
+
+def download_drive_file(file_id, api_key):
+    # BYPASS API RESTRICTIONS: Try direct web download link first for public files
+    url_web = f"https://drive.google.com/uc?export=download&id={file_id}"
+    try:
+        req = urllib.request.Request(url_web, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=20) as response:
+            return response.read(), None
+    except Exception:
+        # Fallback to standard API if the web link is blocked
+        url_api = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media&key={api_key}"
+        try:
+            req = urllib.request.Request(url_api, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=20) as response:
+                return response.read(), None
+        except urllib.error.HTTPError as e:
+            return None, f"HTTP {e.code}: Could not fetch bytes. File might not be fully public."
+        except Exception as e:
+            return None, str(e)
 
 # --- PARSING ENGINE FOR MULTI-FORMATS ---
 def parse_file_content(file_name, file_bytes):
@@ -68,6 +108,7 @@ def parse_file_content(file_name, file_bytes):
             for idx, row in df.iterrows():
                 row_str = ", ".join([f"{col}: {val}" for col, val in row.items()])
                 chunks.append({"text": f"Row {idx}: {row_str}", "source": f"{file_name} (Row {idx})"})
+                
         elif ext in ['xlsx', 'xls']:
             xl = pd.ExcelFile(io.BytesIO(file_bytes))
             for sheet in xl.sheet_names:
@@ -75,92 +116,82 @@ def parse_file_content(file_name, file_bytes):
                 for idx, row in df.iterrows():
                     row_str = ", ".join([f"{col}: {val}" for col, val in row.items()])
                     chunks.append({"text": f"Sheet: {sheet} | Row {idx}: {row_str}", "source": f"{file_name} ({sheet}, R{idx})"})
+                    
         elif ext == 'pdf':
             pdf_reader = PdfReader(io.BytesIO(file_bytes))
             for idx, page in enumerate(pdf_reader.pages):
                 text = page.extract_text()
                 if text and text.strip():
-                    chunks.append({"text": text, "source": f"{file_name} (Page {idx+1})"})
+                    chunks.extend(chunk_text(text, f"{file_name} (Page {idx+1})"))
+                    
         elif ext in ['docx', 'doc']:
             doc = Document(io.BytesIO(file_bytes))
-            for idx, para in enumerate([p.text for p in doc.paragraphs if p.text.strip()]):
-                chunks.append({"text": para, "source": f"{file_name} (Para {idx+1})"})
+            full_text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
+            chunks.extend(chunk_text(full_text, f"{file_name} (Doc Text)"))
+            
         elif ext == 'json':
             data = json.loads(file_bytes.decode('utf-8'))
-            chunks.append({"text": json.dumps(data, indent=2), "source": file_name})
+            data_str = json.dumps(data)
+            chunks.extend(chunk_text(data_str, file_name, max_words=300))
+            
         else:
-             chunks.append({"text": file_bytes.decode('utf-8', errors='ignore'), "source": file_name})
+             chunks.extend(chunk_text(file_bytes.decode('utf-8', errors='ignore'), file_name))
+             
     except Exception as e:
-        st.warning(f"Could not parse {file_name}: {e}")
+        st.warning(f"⚠️ Could not parse {file_name}: {e}")
     return chunks
 
-# --- SIDEBAR CONFIGURATION (UPDATED FOR DIRECT UPLOAD) ---
-with st.sidebar:
-    st.header("⚙️ Configuration Panel")
-    st.success("✅ Secure AI Core Initialized.")
-    
-    # NEW: Streamlit File Uploader
-    uploaded_files = st.file_uploader(
-        "Upload Business Data", 
-        type=['csv', 'xlsx', 'pdf', 'docx', 'json'],
-        accept_multiple_files=True
-    )
-    
-    process_btn = st.button("Ingest Uploaded Files", type="primary", disabled=not uploaded_files)
-
-    st.markdown("---")
-    st.markdown("### 📋 System Status")
-    if st.session_state.processed_files:
-        st.success(f"Ingested {len(st.session_state.processed_files)} files.")
-        for f in st.session_state.processed_files:
-            st.text(f"• {f}")
-    else:
-        st.info("No documents currently loaded into Vector Store.")
-
-# --- EXECUTE INGESTION PIPELINE (UPDATED FOR DIRECT UPLOAD) ---
-if process_btn and uploaded_files:
+# --- EXECUTE INGESTION PIPELINE ---
+if fetch_btn:
     with st.status("🚀 Processing Data Pipeline...", expanded=True) as status:
+        st.write("📡 Fetching directory from Google Drive...")
+        files = fetch_files_from_drive(DRIVE_FOLDER_ID, GOOGLE_DRIVE_API_KEY)
+        
+        if not files:
+            status.update(label="❌ No files found in folder. Check Folder ID and Permissions.", state="error")
+            st.stop()
+            
         all_chunks = []
         processed_names = []
         
-        for file in uploaded_files:
-            f_name = file.name
-            st.write(f"⚙️ Parsing content for: {f_name}")
+        for f in files:
+            f_name, f_id = f['name'], f['id']
+            st.write(f"📥 Downloading: {f_name}...")
             
-            # Read bytes directly from the uploaded file
-            f_bytes = file.getvalue()
+            f_bytes, error_msg = download_drive_file(f_id, GOOGLE_DRIVE_API_KEY)
             
-            file_chunks = parse_file_content(f_name, f_bytes)
-            if file_chunks:
-                all_chunks.extend(file_chunks)
-                processed_names.append(f_name)
+            if f_bytes:
+                st.write(f"⚙️ Extracting data from: {f_name}")
+                file_chunks = parse_file_content(f_name, f_bytes)
+                if file_chunks:
+                    all_chunks.extend(file_chunks)
+                    processed_names.append(f_name)
             else:
-                st.write(f"⚠️ No readable text found in {f_name}")
+                st.error(f"❌ Failed to download {f_name}: {error_msg}")
         
         if not all_chunks:
             status.update(label="❌ Pipeline Failed: No valid data could be extracted.", state="error")
             st.stop()
             
-        st.write(f"🧠 Generating AI Embeddings for {len(all_chunks)} data chunks...")
+        st.write(f"🧠 Generating AI Embeddings for {len(all_chunks)} chunks...")
         progress_bar = st.progress(0)
         
         st.session_state.vectorstore = []
         
-        # Dynamically find valid model
+        # Determine Embedding Model dynamically
+        embed_model = "models/text-embedding-004"
         try:
-            valid_models = [m.name for m in genai.list_models() if 'embedContent' in m.supported_generation_methods]
-            if valid_models:
-                st.session_state.embed_model = valid_models[0]
+            valid = [m.name for m in genai.list_models() if 'embedContent' in m.supported_generation_methods]
+            if valid: embed_model = valid[0]
         except Exception:
             pass
 
-        # Robust embedding with progress tracking
+        # Robust embedding with fallback logic
         for i, chunk in enumerate(all_chunks):
-            success = False
             for attempt in range(3):
                 try:
                     emb = genai.embed_content(
-                        model=st.session_state.embed_model,
+                        model=embed_model,
                         content=chunk['text'],
                         task_type="retrieval_document"
                     )['embedding']
@@ -170,23 +201,19 @@ if process_btn and uploaded_files:
                         "text": chunk['text'],
                         "source": chunk['source']
                     })
-                    success = True
                     break
                 except Exception:
-                    time.sleep(1.5)
-            
-            if not success:
-                st.warning(f"⚠️ Skipped embedding a chunk from {chunk['source']} due to API limits.")
+                    time.sleep(2) # 2 sec backoff to prevent API quota crash
             
             progress_bar.progress((i + 1) / len(all_chunks))
             
         if not st.session_state.vectorstore:
-            status.update(label="❌ Failed to generate embeddings due to persistent API errors.", state="error")
+            status.update(label="❌ Failed to generate embeddings. Check Gemini API key limit.", state="error")
             st.stop()
             
         st.session_state.processed_files = processed_names
-        status.update(label="✅ Ingestion Complete! Data is ready for query.", state="complete")
-        time.sleep(1.5)
+        status.update(label="✅ Ingestion Complete! Chatbot is armed and ready.", state="complete")
+        time.sleep(1)
         st.rerun()
 
 # --- CHAT INTERFACE & ENGINE ---
@@ -196,20 +223,24 @@ for message in st.session_state.messages:
         if message.get("html_chart"):
             components.html(message["html_chart"], height=500)
 
-if user_query := st.chat_input("Ask DataIntern about your business logs..."):
+if user_query := st.chat_input("Ask DataIntern about your business logs, e.g., 'Chart revenue by region'..."):
     with st.chat_message("user"):
         st.markdown(user_query)
     
     st.session_state.messages.append({"role": "user", "content": user_query})
     
     if st.session_state.vectorstore:
-        context_str = ""
-        
+        embed_model = "models/text-embedding-004"
+        try:
+            valid = [m.name for m in genai.list_models() if 'embedContent' in m.supported_generation_methods]
+            if valid: embed_model = valid[0]
+        except Exception: pass
+
         query_embedding = None
         for attempt in range(3):
             try:
                 query_embedding = genai.embed_content(
-                    model=st.session_state.embed_model,
+                    model=embed_model,
                     content=user_query,
                     task_type="retrieval_query"
                 )['embedding']
@@ -218,12 +249,13 @@ if user_query := st.chat_input("Ask DataIntern about your business logs..."):
                 time.sleep(1.5)
                 
         if not query_embedding:
-            st.error("Failed to connect to AI API. Please wait a moment and try asking again.")
+            st.error("AI API is currently busy. Please wait a moment and try asking again.")
             st.stop()
         
+        # Rank by pure Cosine distance
         scored = [(cosine_similarity(query_embedding, item["vector"]), item) for item in st.session_state.vectorstore]
         scored.sort(key=lambda x: x[0], reverse=True)
-        top_k = scored[:15]
+        top_k = scored[:20] # Provide top 20 blocks for maximum context
         
         context_blocks = [f"Source [{item['source']}]: {item['text']}\n" for score, item in top_k]
         context_str = "\n".join(context_blocks)
@@ -236,7 +268,7 @@ if user_query := st.chat_input("Ask DataIntern about your business logs..."):
         If text answer:
         {{
             "requires_chart": false,
-            "text_response": "Your answer here",
+            "text_response": "Your factual answer here.",
             "citations": ["Source 1", "Source 2"]
         }}
 
@@ -260,12 +292,12 @@ if user_query := st.chat_input("Ask DataIntern about your business logs..."):
         """
         
         with st.chat_message("assistant"):
-            with st.spinner("Analyzing..."):
+            with st.spinner("Analyzing business intelligence..."):
                 try:
                     model = genai.GenerativeModel('gemini-1.5-flash')
                     response = model.generate_content([system_prompt, user_query])
                     
-                    # FIX: Robust JSON extraction to prevent parser crashes
+                    # Bulletproof JSON extraction
                     raw_response = response.text.strip()
                     json_match = re.search(r'\{.*\}', raw_response, re.DOTALL)
                     
@@ -298,6 +330,6 @@ if user_query := st.chat_input("Ask DataIntern about your business logs..."):
                     st.session_state.messages.append({"role": "assistant", "content": final_text, "html_chart": html_str})
 
                 except Exception as e:
-                    st.error(f"Failed to parse LLM response. The AI might not have formatted the JSON correctly. {e}")
+                    st.error(f"Failed to parse AI output. The query might be too complex or data formatting is irregular. {e}")
     elif not st.session_state.vectorstore:
         st.info("Please ingest a Google Drive folder in the sidebar to start.")
