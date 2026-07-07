@@ -38,23 +38,23 @@ if "processed_files" not in st.session_state:
 def embed_text_safe(text, task_type):
     """Tries primary embedding model, falls back to legacy if server rejects it."""
     for model_name in ["models/text-embedding-004", "models/embedding-001"]:
-        for attempt in range(3):
+        for attempt in range(5):  # Increased to 5 attempts
             try:
                 return genai.embed_content(model=model_name, content=text, task_type=task_type)['embedding']
             except Exception:
-                time.sleep(1.5) # Absorb API rate limits safely
-    raise Exception("Google AI API is overloaded. Please wait 10 seconds.")
+                time.sleep(4) # Wait 4 seconds between attempts to safely clear rate limits
+    raise Exception("Google AI API free quota reached. Please wait 30 seconds and try again.")
 
 def chat_safe(prompt):
     """Tries the fastest chat model, falls back to stable legacy if needed."""
     for model_name in ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]:
-        for attempt in range(3):
+        for attempt in range(5):  # Increased to 5 attempts
             try:
                 model = genai.GenerativeModel(model_name)
                 return model.generate_content(prompt).text
             except Exception:
-                time.sleep(2)
-    raise Exception("Google AI API is overloaded. Please wait 10 seconds.")
+                time.sleep(5) # Wait 5 seconds between attempts to safely clear rate limits
+    raise Exception("Google AI API free quota reached. Please wait 30 seconds and try again.")
 
 def cosine_similarity(a, b):
     norm = np.linalg.norm(a) * np.linalg.norm(b)
@@ -84,8 +84,8 @@ def download_drive_file(file_id, api_key):
         except Exception:
             return None
 
-def chunk_text_safe(text, source_name, max_words=300):
-    """Smart chunking: Groups text to drastically reduce API calls."""
+def chunk_text_safe(text, source_name, max_words=800):
+    """Smart chunking: Groups text to drastically reduce API calls. Increased block size for efficiency."""
     chunks = []
     words = str(text).split()
     for i in range(0, len(words), max_words):
