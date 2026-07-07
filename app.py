@@ -8,8 +8,10 @@ import streamlit.components.v1 as components
 from pypdf import PdfReader
 from docx import Document
 import urllib.request
+import urllib.error
 import io
 import time
+import re
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="DataIntern - RAG CRM Assistant", layout="wide")
@@ -41,7 +43,7 @@ if "embed_model" not in st.session_state:
 with st.sidebar:
     st.header("⚙️ Configuration Panel")
     st.success("✅ API Keys securely loaded from backend.")
-    fetch_btn = st.button("Ingest Files From Drive")
+    fetch_btn = st.button("Ingest Files From Drive", type="primary")
 
     st.markdown("---")
     st.markdown("### 📋 System Status")
@@ -61,23 +63,24 @@ def fetch_files_from_drive(folder_id, api_key):
     url = f"https://www.googleapis.com/drive/v3/files?q='{folder_id}'+in+parents&key={api_key}"
     try:
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        # FIX: Added timeout to prevent infinite network hanging
         with urllib.request.urlopen(req, timeout=15) as response:
             data = json.loads(response.read().decode())
             return data.get('files', [])
     except Exception as e:
-        st.sidebar.error(f"Failed to access Google Drive. Check Drive API Key and Folder Permissions.\nError: {e}")
         return []
 
 def download_drive_file(file_id, api_key):
     url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media&key={api_key}"
     try:
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        # FIX: Added timeout to prevent infinite network hanging
         with urllib.request.urlopen(req, timeout=15) as response:
-            return response.read()
-    except Exception:
-        return None
+            return response.read(), None
+    except urllib.error.HTTPError as e:
+        if e.code == 403:
+            return None, "HTTP 403: Google native Docs/Sheets cannot be downloaded as raw bytes. Please upload standard PDFs or CSVs."
+        return None, f"HTTP Error {e.code}"
+    except Exception as e:
+        return None, str(e)
 
 # --- PARSING ENGINE FOR MULTI-FORMATS ---
 def parse_file_content(file_name, file_bytes):
@@ -109,77 +112,93 @@ def parse_file_content(file_name, file_bytes):
         elif ext == 'json':
             data = json.loads(file_bytes.decode('utf-8'))
             chunks.append({"text": json.dumps(data, indent=2), "source": file_name})
+        else:
+             chunks.append({"text": file_bytes.decode('utf-8', errors='ignore'), "source": file_name})
     except Exception as e:
         st.warning(f"Could not parse {file_name}: {e}")
     return chunks
 
 # --- EXECUTE INGESTION PIPELINE ---
 if fetch_btn:
-    # First just fetch the file list
-    with st.spinner("Connecting to Google Drive..."):
+    # FIX: Use a visual status container to show step-by-step progress
+    with st.status("🚀 Processing Data Pipeline...", expanded=True) as status:
+        st.write("📡 Connecting to Google Drive...")
         files = fetch_files_from_drive(DRIVE_FOLDER_ID, GOOGLE_DRIVE_API_KEY)
         
-    if not files:
-        st.sidebar.warning("No files found or folder is not public.")
-    else:
+        if not files:
+            status.update(label="❌ No files found or folder is restricted.", state="error")
+            st.stop()
+            
         all_chunks = []
         processed_names = []
         
-        # FIX: Create a live status text so user knows it's not frozen
-        status_text = st.empty()
-        
         for f in files:
             f_name, f_id = f['name'], f['id']
-            status_text.info(f"Downloading file: {f_name}...")
+            st.write(f"📥 Fetching: {f_name}...")
             
-            f_bytes = download_drive_file(f_id, GOOGLE_DRIVE_API_KEY)
+            f_bytes, error_msg = download_drive_file(f_id, GOOGLE_DRIVE_API_KEY)
+            
             if f_bytes:
-                status_text.info(f"Parsing content: {f_name}...")
+                st.write(f"⚙️ Parsing content for: {f_name}")
                 file_chunks = parse_file_content(f_name, f_bytes)
-                all_chunks.extend(file_chunks)
-                processed_names.append(f_name)
+                if file_chunks:
+                    all_chunks.extend(file_chunks)
+                    processed_names.append(f_name)
+                else:
+                    st.write(f"⚠️ No readable text found in {f_name}")
+            else:
+                st.error(f"❌ Failed to read {f_name}: {error_msg}")
         
-        if all_chunks:
-            status_text.info("Generating AI embeddings (This might take a moment)...")
-            st.session_state.vectorstore = []
+        if not all_chunks:
+            status.update(label="❌ Pipeline Failed: No valid data could be extracted from any files.", state="error")
+            st.stop()
             
-            # Dynamically find the exact embedding model your API key supports
-            try:
-                valid_models = [m.name for m in genai.list_models() if 'embedContent' in m.supported_generation_methods]
-                if valid_models:
-                    st.session_state.embed_model = valid_models[0]
-            except Exception:
-                pass # Fallback to default if list_models fails
+        st.write(f"🧠 Generating AI Embeddings for {len(all_chunks)} data chunks...")
+        progress_bar = st.progress(0)
+        
+        st.session_state.vectorstore = []
+        
+        # Dynamically find valid model
+        try:
+            valid_models = [m.name for m in genai.list_models() if 'embedContent' in m.supported_generation_methods]
+            if valid_models:
+                st.session_state.embed_model = valid_models[0]
+        except Exception:
+            pass
 
-            # Process chunks with a retry backoff to prevent API crash
-            for i, chunk in enumerate(all_chunks):
-                if i % 10 == 0: # Update UI every 10 chunks
-                     status_text.info(f"Embedding chunk {i+1} of {len(all_chunks)}...")
-                for attempt in range(3):
-                    try:
-                        emb = genai.embed_content(
-                            model=st.session_state.embed_model,
-                            content=chunk['text'],
-                            task_type="retrieval_document"
-                        )['embedding']
-                        
-                        st.session_state.vectorstore.append({
-                            "vector": emb,
-                            "text": chunk['text'],
-                            "source": chunk['source']
-                        })
-                        break # Exit the retry loop if successful
-                    except Exception as e:
-                        if attempt == 2:
-                            pass # Skip this chunk on 3rd failure instead of crashing app
-                        else:
-                            time.sleep(1.5) # Wait before retry to clear rate limits
+        # Robust embedding with progress tracking
+        for i, chunk in enumerate(all_chunks):
+            success = False
+            for attempt in range(3):
+                try:
+                    emb = genai.embed_content(
+                        model=st.session_state.embed_model,
+                        content=chunk['text'],
+                        task_type="retrieval_document"
+                    )['embedding']
+                    
+                    st.session_state.vectorstore.append({
+                        "vector": emb,
+                        "text": chunk['text'],
+                        "source": chunk['source']
+                    })
+                    success = True
+                    break
+                except Exception:
+                    time.sleep(1.5)
             
-            status_text.success("Ingestion complete!")
-            time.sleep(1) # Let user see success message before reload
-            status_text.empty() # Clear the status box
+            if not success:
+                st.warning(f"⚠️ Skipped embedding a chunk from {chunk['source']} due to API limits.")
+            
+            progress_bar.progress((i + 1) / len(all_chunks))
+            
+        if not st.session_state.vectorstore:
+            status.update(label="❌ Failed to generate embeddings due to persistent API errors.", state="error")
+            st.stop()
             
         st.session_state.processed_files = processed_names
+        status.update(label="✅ Ingestion Complete! Data is ready for query.", state="complete")
+        time.sleep(1.5)
         st.rerun()
 
 # --- CHAT INTERFACE & ENGINE ---
@@ -198,7 +217,6 @@ if user_query := st.chat_input("Ask DataIntern about your business logs..."):
     if st.session_state.vectorstore:
         context_str = ""
         
-        # Generate query embedding safely with backoff
         query_embedding = None
         for attempt in range(3):
             try:
@@ -259,13 +277,15 @@ if user_query := st.chat_input("Ask DataIntern about your business logs..."):
                     model = genai.GenerativeModel('gemini-1.5-flash')
                     response = model.generate_content([system_prompt, user_query])
                     
+                    # FIX: Robust JSON extraction to prevent parser crashes
                     raw_response = response.text.strip()
-                    if raw_response.startswith("```json"):
-                        raw_response = raw_response[7:-3]
-                    elif raw_response.startswith("```"):
-                        raw_response = raw_response[3:-3]
+                    json_match = re.search(r'\{.*\}', raw_response, re.DOTALL)
                     
-                    response_data = json.loads(raw_response)
+                    if json_match:
+                        response_data = json.loads(json_match.group(0))
+                    else:
+                        response_data = json.loads(raw_response)
+                        
                     text = response_data.get("text_response", "Error parsing text.")
                     citations = response_data.get("citations", [])
                     
@@ -290,6 +310,6 @@ if user_query := st.chat_input("Ask DataIntern about your business logs..."):
                     st.session_state.messages.append({"role": "assistant", "content": final_text, "html_chart": html_str})
 
                 except Exception as e:
-                    st.error(f"Failed to parse LLM response. Ensure context contains enough data. {e}")
+                    st.error(f"Failed to parse LLM response. The AI might not have formatted the JSON correctly. {e}")
     elif not st.session_state.vectorstore:
         st.info("Please ingest a Google Drive folder in the sidebar to start.")
