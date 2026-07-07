@@ -36,12 +36,14 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 if "processed_files" not in st.session_state:
     st.session_state.processed_files = []
+if "auto_start" not in st.session_state:
+    st.session_state.auto_start = False
 
 # --- SIDEBAR CONFIGURATION ---
 with st.sidebar:
     st.header("⚙️ Configuration Panel")
     st.success("✅ Secure AI Core Initialized.")
-    fetch_btn = st.button("Ingest Files From Drive", type="primary")
+    fetch_btn = st.button("Refresh Files From Drive", type="primary")
 
     st.markdown("---")
     st.markdown("### 📋 System Status")
@@ -139,7 +141,8 @@ def parse_file_content(file_name, file_bytes):
     return chunks
 
 # --- PIPELINE ---
-if fetch_btn:
+if fetch_btn or not st.session_state.auto_start:
+    st.session_state.auto_start = True
     with st.status("🚀 Processing Data Pipeline...", expanded=True) as status:
         st.write("📡 Fetching directory...")
         files = fetch_files_from_drive(DRIVE_FOLDER_ID, GOOGLE_DRIVE_API_KEY)
