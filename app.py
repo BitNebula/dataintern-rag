@@ -84,34 +84,39 @@ def download_drive_file(file_id, api_key):
         except Exception:
             return None
 
+def chunk_text_safe(text, source_name, max_words=300):
+    """Smart chunking: Groups text to drastically reduce API calls."""
+    chunks = []
+    words = str(text).split()
+    for i in range(0, len(words), max_words):
+        chunks.append({"text": " ".join(words[i:i+max_words]), "source": f"{source_name} (Part {i//max_words + 1})"})
+    return chunks
+
 def parse_file_content(file_name, file_bytes):
+    """Parses files and smartly groups content to prevent API overload."""
     chunks = []
     ext = file_name.split('.')[-1].lower()
     try:
         if ext == 'csv':
             df = pd.read_csv(io.BytesIO(file_bytes))
-            for idx, row in df.iterrows():
-                row_str = ", ".join([f"{col}: {val}" for col, val in row.items()])
-                chunks.append({"text": f"Row {idx}: {row_str}", "source": f"{file_name} (Row {idx})"})
+            # Group all rows into large string blocks instead of 1 row = 1 chunk
+            chunks.extend(chunk_text_safe(df.to_csv(index=False), file_name))
         elif ext in ['xlsx', 'xls']:
             xl = pd.ExcelFile(io.BytesIO(file_bytes))
             for sheet in xl.sheet_names:
                 df = pd.read_excel(io.BytesIO(file_bytes), sheet_name=sheet)
-                for idx, row in df.iterrows():
-                    row_str = ", ".join([f"{col}: {val}" for col, val in row.items()])
-                    chunks.append({"text": f"Sheet: {sheet} | Row {idx}: {row_str}", "source": f"{file_name} ({sheet})"})
+                chunks.extend(chunk_text_safe(df.to_csv(index=False), f"{file_name} ({sheet})"))
         elif ext == 'pdf':
             pdf_reader = PdfReader(io.BytesIO(file_bytes))
-            for idx, page in enumerate(pdf_reader.pages):
-                text = page.extract_text()
-                if text.strip(): chunks.append({"text": text, "source": f"{file_name} (Pg {idx+1})"})
+            full_text = " ".join([page.extract_text() or "" for page in pdf_reader.pages])
+            chunks.extend(chunk_text_safe(full_text, file_name))
         elif ext in ['docx', 'doc']:
             doc = Document(io.BytesIO(file_bytes))
-            for p in doc.paragraphs:
-                if p.text.strip(): chunks.append({"text": p.text, "source": file_name})
+            full_text = " ".join([p.text for p in doc.paragraphs])
+            chunks.extend(chunk_text_safe(full_text, file_name))
         elif ext == 'json':
             data = json.loads(file_bytes.decode('utf-8'))
-            chunks.append({"text": json.dumps(data)[:1500], "source": file_name})
+            chunks.extend(chunk_text_safe(json.dumps(data), file_name))
     except Exception:
         pass
     return chunks
@@ -131,12 +136,17 @@ if not st.session_state.data_loaded:
                     processed.append(f['name'])
             
             st.write(f"🧠 Generating AI Memory for {len(all_chunks)} data chunks...")
-            for chunk in all_chunks:
+            progress_bar = st.progress(0) # Visual progress tracking
+            
+            for i, chunk in enumerate(all_chunks):
                 try:
                     emb = embed_text_safe(chunk['text'], "retrieval_document")
                     st.session_state.vectorstore.append({"vector": emb, "text": chunk['text'], "source": chunk['source']})
                 except Exception:
                     pass # Skip chunk gracefully if API completely rejects
+                
+                # Update progress bar
+                progress_bar.progress((i + 1) / len(all_chunks))
             
             st.session_state.processed_files = processed
             
