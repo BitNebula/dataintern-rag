@@ -12,7 +12,18 @@ import io
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="DataIntern - RAG CRM Assistant", layout="wide")
 st.title("💼 DataIntern: RAG Chatbot for CRM & Business Data")
-st.caption("Automated Multi-Format Ingestion, Pure-Python Vector Retrieval, and Instant Visualization Engine")
+st.caption("Secure Multi-Format Ingestion & Instant Visualization Engine")
+
+# --- SECURE SECRETS LOADING ---
+try:
+    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+    GOOGLE_DRIVE_API_KEY = st.secrets["GOOGLE_DRIVE_API_KEY"]
+    DRIVE_FOLDER_ID = st.secrets["DRIVE_FOLDER_ID"]
+except KeyError as e:
+    st.error(f"Missing Secret: {e}. Please add it to your Streamlit Cloud Secrets settings.")
+    st.stop()
+
+genai.configure(api_key=GEMINI_API_KEY)
 
 # --- INITIALIZE SESSION STATE ---
 if "vector_db" not in st.session_state:
@@ -25,8 +36,7 @@ if "processed_files" not in st.session_state:
 # --- SIDEBAR CONFIGURATION ---
 with st.sidebar:
     st.header("⚙️ Configuration Panel")
-    gemini_api_key = st.text_input("1. Enter Gemini API Key:", type="password")
-    drive_folder_id = st.text_input("2. Enter Public Google Drive Folder ID:")
+    st.success("✅ API Keys securely loaded from backend.")
     fetch_btn = st.button("Ingest Files From Drive")
 
     st.markdown("---")
@@ -44,7 +54,6 @@ def cosine_similarity(a, b):
 
 # --- GOOGLE DRIVE FILE INGESTION VIA API KEY ---
 def fetch_files_from_drive(folder_id, api_key):
-    # Standard public endpoint to list files from a public folder using API key
     url = f"https://www.googleapis.com/drive/v3/files?q='{folder_id}'+in+parents&key={api_key}"
     try:
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
@@ -102,21 +111,15 @@ def parse_file_content(file_name, file_bytes):
             data_str = json.dumps(data, indent=2)
             chunks.append({"text": data_str, "source": file_name})
             
-        elif ext == 'tsv':
-            df = pd.read_csv(io.BytesIO(file_bytes), sep='\t')
-            for idx, row in df.iterrows():
-                row_str = ", ".join([f"{col}: {val}" for col, val in row.items()])
-                chunks.append({"text": f"Row {idx}: {row_str}", "source": f"{file_name} (Row {idx})"})
     except Exception as e:
         st.warning(f"Could not parse file {file_name}: {e}")
         
     return chunks
 
 # --- EXECUTE INGESTION PIPELINE ---
-if fetch_btn and gemini_api_key and drive_folder_id:
-    genai.configure(api_key=gemini_api_key)
+if fetch_btn:
     with st.spinner("Accessing Google Drive & compiling documents..."):
-        files = fetch_files_from_drive(drive_folder_id, gemini_api_key)
+        files = fetch_files_from_drive(DRIVE_FOLDER_ID, GOOGLE_DRIVE_API_KEY)
         if not files:
             st.sidebar.warning("No files found or folder is not public.")
         else:
@@ -126,7 +129,7 @@ if fetch_btn and gemini_api_key and drive_folder_id:
             for f in files:
                 f_name = f['name']
                 f_id = f['id']
-                f_bytes = download_drive_file(f_id, gemini_api_key)
+                f_bytes = download_drive_file(f_id, GOOGLE_DRIVE_API_KEY)
                 
                 if f_bytes:
                     file_chunks = parse_file_content(f_name, f_bytes)
@@ -136,13 +139,13 @@ if fetch_btn and gemini_api_key and drive_folder_id:
             if all_chunks:
                 with st.spinner("Generating embeddings and building vector catalog..."):
                     texts = [c['text'] for c in all_chunks]
-                    # Batch embedding call for speed optimization
                     response = genai.embed_content(
                         model="models/text-embedding-004",
                         content=texts,
                         task_type="retrieval_document"
                     )
                     
+                    st.session_state.vector_db = []
                     for i, embedding in enumerate(response['embedding']):
                         st.session_state.vector_db.append({
                             "vector": embedding,
@@ -150,140 +153,120 @@ if fetch_btn and gemini_api_key and drive_folder_id:
                             "source": all_chunks[i]['source']
                         })
                 st.session_state.processed_files = processed_names
-                st.experimental_rerun()
+                st.rerun()
 
 # --- CHAT INTERFACE & ENGINE ---
-if not gemini_api_key:
-    st.info("Please enter your Gemini API Key in the sidebar configuration to begin.")
-else:
-    genai.configure(api_key=gemini_api_key)
+# Render historical turns
+for message in st.session_state.chat_history:
+    with st.chat_message(message["role"]):
+        if message["type"] == "text":
+            st.write(message["content"])
+        elif message["type"] == "chart":
+            st.write(message["content"])
+            fig_data = pd.DataFrame(message["chart_data"])
+            if message["chart_type"] == "bar":
+                st.plotly_chart(px.bar(fig_data, x="label", y="value", title=message["chart_title"]))
+            elif message["chart_type"] == "line":
+                st.plotly_chart(px.plotly_chart(px.line(fig_data, x="label", y="value", title=message["chart_title"])))
+            elif message["chart_type"] == "pie":
+                st.plotly_chart(px.pie(fig_data, names="label", values="value", title=message["chart_title"]))
+            elif message["chart_type"] == "scatter":
+                st.plotly_chart(px.scatter(fig_data, x="label", y="value", title=message["chart_title"]))
+
+# Handle user interaction
+if user_query := st.chat_input("Ask DataIntern about your business logs, performance tracking, or custom charts..."):
+    with st.chat_message("user"):
+        st.write(user_query)
     
-    # Render historical turns
-    for message in st.session_state.chat_history:
-        with st.chat_message(message["role"]):
-            if message["type"] == "text":
-                st.write(message["content"])
-            elif message["type"] == "chart":
-                st.write(message["content"])
-                fig_data = pd.DataFrame(message["chart_data"])
-                if message["chart_type"] == "bar":
-                    st.plotly_chart(px.bar(fig_data, x="label", y="value", title=message["chart_title"]))
-                elif message["chart_type"] == "line":
-                    st.plotly_chart(px.line(fig_data, x="label", y="value", title=message["chart_title"]))
-                elif message["chart_type"] == "pie":
-                    st.plotly_chart(px.pie(fig_data, names="label", values="value", title=message["chart_title"]))
-                elif message["chart_type"] == "scatter":
-                    st.plotly_chart(px.scatter(fig_data, x="label", y="value", title=message["chart_title"]))
+    st.session_state.chat_history.append({"role": "user", "type": "text", "content": user_query})
+    
+    # --- RAG RETRIEVAL PIPELINE ---
+    context_str = ""
+    if st.session_state.vector_db:
+        query_embedding = genai.embed_content(
+            model="models/text-embedding-004",
+            content=user_query,
+            task_type="retrieval_query"
+        )['embedding']
+        
+        scored_chunks = [(cosine_similarity(query_embedding, item["vector"]), item) for item in st.session_state.vector_db]
+        scored_chunks.sort(key=lambda x: x[0], reverse=True)
+        top_k = scored_chunks[:15]
+        
+        context_blocks = [f"Source [{item['source']}]: {item['text']}\n" for score, item in top_k]
+        context_str = "\n".join(context_blocks)
+    
+    system_prompt = f"""
+    You are DataIntern, an advanced full-stack RAG engine designed to interpret tabular, financial, and multi-format business logs.
+    
+    STRICT GROUNDING DIRECTIVES:
+    1. Answer the query based ONLY on the Provided Context below.
+    2. If the answer cannot be confidently deduced from the text context, respond exactly with: "I don't see that in your files." Do not try to make up information.
+    3. When providing answers, append the Source tags precisely as mentioned in the context blocks.
+    
+    OUTPUT FORMAT SPECIFICATIONS:
+    Your response must be a single parseable JSON block matching one of these two structures:
 
-    # Handle user interaction
-    if user_query := st.chat_input("Ask DataIntern about your business logs, performance tracking, or custom charts..."):
-        with st.chat_message("user"):
-            st.write(user_query)
-        
-        # --- RAG RETRIEVAL PIPELINE ---
-        context_str = ""
-        retrieved_sources = set()
-        
-        if st.session_state.vector_db:
-            query_embedding = genai.embed_content(
-                model="models/text-embedding-004",
-                content=user_query,
-                task_type="retrieval_query"
-            )['embedding']
-            
-            # Rank entries based on cosine distance matrix
-            scored_chunks = []
-            for item in st.session_state.vector_db:
-                score = cosine_similarity(query_embedding, item["vector"])
-                scored_chunks.append((score, item))
-            
-            scored_chunks.sort(key=lambda x: x[0], reverse=True)
-            top_k = scored_chunks[:15] # Grab top relevant blocks
-            
-            context_blocks = []
-            for score, item in top_k:
-                context_blocks.append(f"Source [{item['source']}]: {item['text']}\n")
-                retrieved_sources.add(item['source'])
-            context_str = "\n".join(context_blocks)
-        
-        # --- LLM SYSTEM PROMPT DESIGN WITH ANTI-HALLUCINATION GUARDRAILS ---
-        system_prompt = f"""
-        You are DataIntern, an advanced full-stack RAG engine designed to interpret tabular, financial, and multi-format business logs.
-        
-        STRICT GROUNDING DIRECTIVES:
-        1. Answer the query based ONLY on the Provided Context below.
-        2. If the answer cannot be confidently deduced from the text context, respond exactly with: "I don't see that in your files." Do not try to make up information.
-        3. When providing answers, append the Source tags precisely as mentioned in the context blocks.
-        
-        VISUALIZATION RECURSION DIRECTIVE:
-        If the user asks for a chart, visualization, distribution or trend metrics, format your output strictly as a structured JSON object.
-        
-        OUTPUT FORMAT SPECIFICATIONS:
-        Your response must be a single parseable JSON block matching one of these two structures:
+    For text answers:
+    {{
+        "type": "text",
+        "content": "Your factual text response here incorporating source citations."
+    }}
 
-        For text answers:
-        {{
-          "type": "text",
-          "content": "Your factual text response here incorporating source citations."
-        }}
+    For chart/graph generation requests:
+    {{
+        "type": "chart",
+        "content": "Short textual summary of data insights shown in the chart.",
+        "chart_type": "bar", // or "line", "pie", "scatter"
+        "chart_title": "Descriptive Chart Title detailing source parameters",
+        "chart_data": [
+            {{"label": "X-axis item string", "value": 12500.50}},
+            {{"label": "Next item string", "value": 14200.00}}
+        ]
+    }}
 
-        For chart/graph generation requests:
-        {{
-          "type": "chart",
-          "content": "Short textual summary of data insights shown in the chart.",
-          "chart_type": "bar" | "line" | "pie" | "scatter",
-          "chart_title": "Descriptive Chart Title detailing source parameters",
-          "chart_data": [
-             {{"label": "X-axis item string", "value": 12500.50}},
-             {{"label": "Next item string", "value": 14200.00}}
-          ]
-        }}
-
-        PROVIDED DATA CONTEXT:
-        {context_str if context_str else "No files have been loaded."}
-        """
-        
-        # Call Gemini Model using JSON Constraint mode
-        with st.chat_message("assistant"):
-            with st.spinner("Processing deep queries..."):
-                try:
-                    model = genai.GenerativeModel('gemini-1.5-flash')
-                    response = model.generate_content(
-                        [system_prompt, f"User Query: {user_query}"],
-                        generation_config={"response_mime_type": "application/json"}
-                    )
+    PROVIDED DATA CONTEXT:
+    {context_str if context_str else "No files have been loaded."}
+    """
+    
+    with st.chat_message("assistant"):
+        with st.spinner("Processing deep queries..."):
+            try:
+                model = genai.GenerativeModel('gemini-1.5-flash')
+                response = model.generate_content(
+                    [system_prompt, f"User Query: {user_query}"],
+                    generation_config={"response_mime_type": "application/json"}
+                )
+                
+                res_payload = json.loads(response.text)
+                
+                if res_payload["type"] == "text":
+                    st.write(res_payload["content"])
+                    st.session_state.chat_history.append({
+                        "role": "assistant",
+                        "type": "text",
+                        "content": res_payload["content"]
+                    })
+                elif res_payload["type"] == "chart":
+                    st.write(res_payload["content"])
+                    fig_data = pd.DataFrame(res_payload["chart_data"])
                     
-                    # Process structure output payload
-                    res_payload = json.loads(response.text)
+                    if res_payload["chart_type"] == "bar":
+                        st.plotly_chart(px.bar(fig_data, x="label", y="value", title=res_payload["chart_title"]))
+                    elif res_payload["chart_type"] == "line":
+                        st.plotly_chart(px.line(fig_data, x="label", y="value", title=res_payload["chart_title"]))
+                    elif res_payload["chart_type"] == "pie":
+                        st.plotly_chart(px.pie(fig_data, names="label", values="value", title=res_payload["chart_title"]))
+                    elif res_payload["chart_type"] == "scatter":
+                        st.plotly_chart(px.scatter(fig_data, x="label", y="value", title=res_payload["chart_title"]))
                     
-                    if res_payload["type"] == "text":
-                        st.write(res_payload["content"])
-                        st.session_state.chat_history.append({
-                            "role": "assistant",
-                            "type": "text",
-                            "content": res_payload["content"]
-                        })
-                    elif res_payload["type"] == "chart":
-                        st.write(res_payload["content"])
-                        fig_data = pd.DataFrame(res_payload["chart_data"])
-                        
-                        # Generate interactive UI components dynamically
-                        if res_payload["chart_type"] == "bar":
-                            st.plotly_chart(px.bar(fig_data, x="label", y="value", title=res_payload["chart_title"]))
-                        elif res_payload["chart_type"] == "line":
-                            st.plotly_chart(px.line(fig_data, x="label", y="value", title=res_payload["chart_title"]))
-                        elif res_payload["chart_type"] == "pie":
-                            st.plotly_chart(px.pie(fig_data, names="label", values="value", title=res_payload["chart_title"]))
-                        elif res_payload["chart_type"] == "scatter":
-                            st.plotly_chart(px.scatter(fig_data, x="label", y="value", title=res_payload["chart_title"]))
-                        
-                        st.session_state.chat_history.append({
-                            "role": "assistant",
-                            "type": "chart",
-                            "content": res_payload["content"],
-                            "chart_type": res_payload["chart_type"],
-                            "chart_title": res_payload["chart_title"],
-                            "chart_data": res_payload["chart_data"]
-                        })
-                except Exception as ex:
-                    st.error(f"Error executing engine request: {ex}")
+                    st.session_state.chat_history.append({
+                        "role": "assistant",
+                        "type": "chart",
+                        "content": res_payload["content"],
+                        "chart_type": res_payload["chart_type"],
+                        "chart_title": res_payload["chart_title"],
+                        "chart_data": res_payload["chart_data"]
+                    })
+            except Exception as ex:
+                st.error(f"Error executing engine request: {ex}")
