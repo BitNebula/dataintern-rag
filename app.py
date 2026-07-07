@@ -9,6 +9,7 @@ from pypdf import PdfReader
 from docx import Document
 import urllib.request
 import io
+import time
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="DataIntern - RAG CRM Assistant", layout="wide")
@@ -33,6 +34,8 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 if "processed_files" not in st.session_state:
     st.session_state.processed_files = []
+if "embed_model" not in st.session_state:
+    st.session_state.embed_model = "models/text-embedding-004" # Default fallback
 
 # --- SIDEBAR CONFIGURATION ---
 with st.sidebar:
@@ -127,32 +130,38 @@ if fetch_btn:
                     processed_names.append(f_name)
             
             if all_chunks:
-                with st.spinner("Generating embeddings (Processing chunks safely)..."):
+                with st.spinner("Generating embeddings (Handling API rate limits safely)..."):
                     st.session_state.vectorstore = []
                     
-                    # FIX: Loop chunks one-by-one to bypass batch endpoint errors
-                    active_model = "models/text-embedding-004"
+                    # FIX: Dynamically find the exact embedding model your API key supports
+                    try:
+                        valid_models = [m.name for m in genai.list_models() if 'embedContent' in m.supported_generation_methods]
+                        if valid_models:
+                            st.session_state.embed_model = valid_models[0]
+                    except Exception:
+                        pass # Fallback to default if list_models fails
+
+                    # FIX: Process chunks with a retry backoff to prevent API crash
                     for chunk in all_chunks:
-                        try:
-                            emb = genai.embed_content(
-                                model=active_model,
-                                content=chunk['text'],
-                                task_type="retrieval_document"
-                            )['embedding']
-                        except Exception:
-                            # If new model fails, gracefully degrade to legacy model
-                            active_model = "models/embedding-001"
-                            emb = genai.embed_content(
-                                model=active_model,
-                                content=chunk['text'],
-                                task_type="retrieval_document"
-                            )['embedding']
-                            
-                        st.session_state.vectorstore.append({
-                            "vector": emb,
-                            "text": chunk['text'],
-                            "source": chunk['source']
-                        })
+                        for attempt in range(3):
+                            try:
+                                emb = genai.embed_content(
+                                    model=st.session_state.embed_model,
+                                    content=chunk['text'],
+                                    task_type="retrieval_document"
+                                )['embedding']
+                                
+                                st.session_state.vectorstore.append({
+                                    "vector": emb,
+                                    "text": chunk['text'],
+                                    "source": chunk['source']
+                                })
+                                break # Exit the retry loop if successful
+                            except Exception as e:
+                                if attempt == 2:
+                                    pass # Skip this chunk on 3rd failure instead of crashing app
+                                else:
+                                    time.sleep(1.5) # Wait before retry to clear rate limits
                         
                 st.session_state.processed_files = processed_names
                 st.rerun()
@@ -173,19 +182,22 @@ if user_query := st.chat_input("Ask DataIntern about your business logs..."):
     if st.session_state.vectorstore:
         context_str = ""
         
-        # FIX: Robust fallback for Query Embedding
-        try:
-            query_embedding = genai.embed_content(
-                model="models/text-embedding-004",
-                content=user_query,
-                task_type="retrieval_query"
-            )['embedding']
-        except Exception:
-            query_embedding = genai.embed_content(
-                model="models/embedding-001",
-                content=user_query,
-                task_type="retrieval_query"
-            )['embedding']
+        # FIX: Generate query embedding safely with backoff
+        query_embedding = None
+        for attempt in range(3):
+            try:
+                query_embedding = genai.embed_content(
+                    model=st.session_state.embed_model,
+                    content=user_query,
+                    task_type="retrieval_query"
+                )['embedding']
+                break
+            except Exception:
+                time.sleep(1.5)
+                
+        if not query_embedding:
+            st.error("Failed to connect to AI API. Please wait a moment and try asking again.")
+            st.stop()
         
         scored = [(cosine_similarity(query_embedding, item["vector"]), item) for item in st.session_state.vectorstore]
         scored.sort(key=lambda x: x[0], reverse=True)
