@@ -226,13 +226,10 @@ if user_query := st.chat_input("Ask DataIntern to chart your data..."):
         with st.chat_message("assistant"):
             with st.spinner("Analyzing data and generating insights..."):
                 try:
-                    # DUAL-ENGINE FALLBACK: Try Flash first, silently switch to Pro if 404 error occurs
-                    try:
-                        model = genai.GenerativeModel('models/gemini-1.5-flash')
-                        response = model.generate_content([system_prompt, f"User Query: {user_query}"])
-                    except Exception:
-                        model = genai.GenerativeModel('gemini-pro') # Rock-solid legacy fallback
-                        response = model.generate_content([system_prompt, f"User Query: {user_query}"])
+                    # DYNAMIC MODEL SELECTION: Automatically grab the best available chat model for your specific API key
+                    chat_model_name = get_best_model(method='generateContent')
+                    model = genai.GenerativeModel(chat_model_name)
+                    response = model.generate_content([system_prompt, f"User Query: {user_query}"])
                     
                     # BULLETPROOF JSON PARSING
                     raw = response.text.strip()
