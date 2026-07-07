@@ -193,7 +193,6 @@ if user_query := st.chat_input("Ask DataIntern to chart your data..."):
     if st.session_state.vectorstore:
         embed_model = get_best_model(method='embedContent')
         
-        # --- FIX: SECURE QUERY EMBEDDING WITH RETRY ---
         query_emb = None
         with st.spinner("Embedding query..."):
             for attempt in range(4):
@@ -217,3 +216,79 @@ if user_query := st.chat_input("Ask DataIntern to chart your data..."):
         {{
             "requires_chart": false,
             "text_response": "Factual answer based on context."
+        }}
+
+        If the user asks for a chart, graph, or says "anything relevant", you MUST extract and aggregate numerical data from the context and use this exact format:
+        {{
+            "requires_chart": true,
+            "text_response": "Here is the visualized data:",
+            "chart_data": {{
+                "type": "bar",
+                "title": "Descriptive Chart Title",
+                "x_label": "X Axis Label",
+                "y_label": "Y Axis Label",
+                "x_data": ["Category A", "Category B", "Category C"],
+                "y_data": [10, 50, 25]
+            }}
+        }}
+
+        CONTEXT DATA:
+        {context}
+        """
+
+        with st.chat_message("assistant"):
+            with st.spinner("Analyzing data and generating insights..."):
+                try:
+                    chat_model_name = get_best_model(method='generateContent')
+                    model = genai.GenerativeModel(chat_model_name)
+                    
+                    response = None
+                    for attempt in range(4):
+                        try:
+                            response = model.generate_content([system_prompt, f"User Query: {user_query}"])
+                            break
+                        except Exception as e:
+                            time.sleep(3) 
+                            if attempt == 3:
+                                st.error("Analysis timeout due to high API load. Try asking again.")
+                                st.stop()
+                    
+                    try:
+                        raw = response.text.strip()
+                    except Exception:
+                        raw = '{"requires_chart": false, "text_response": "Data retrieved, but AI formatting failed."}'
+                        
+                    raw = raw.replace('```json', '').replace('```', '').strip()
+                    
+                    try:
+                        res = json.loads(raw)
+                    except Exception:
+                        match = re.search(r'\{.*\}', raw, re.DOTALL)
+                        if match:
+                            res = json.loads(match.group(0))
+                        else:
+                            res = {"requires_chart": False, "text_response": raw}
+                    
+                    st.markdown(res.get("text_response", "Here are your insights:"))
+                    
+                    if res.get("requires_chart") and res.get("chart_data"):
+                        c = res.get("chart_data", {})
+                        fig = go.Figure()
+                        ctype = c.get('type', 'bar')
+                        x_val, y_val = c.get('x_data', []), c.get('y_data', [])
+                        
+                        if ctype == 'bar': fig.add_trace(go.Bar(x=x_val, y=y_val))
+                        elif ctype == 'line': fig.add_trace(go.Scatter(x=x_val, y=y_val, mode='lines+markers'))
+                        elif ctype == 'pie': fig.add_trace(go.Pie(labels=x_val, values=y_val))
+                        elif ctype == 'scatter': fig.add_trace(go.Scatter(x=x_val, y=y_val, mode='markers'))
+                        
+                        fig.update_layout(title=c.get('title', 'Data Insights'), xaxis_title=c.get('x_label', ''), yaxis_title=c.get('y_label', ''))
+                        html_chart = fig.to_html(full_html=True, include_plotlyjs='cdn')
+                        
+                        components.html(html_chart, height=500)
+                        st.session_state.messages.append({"role": "assistant", "content": res.get("text_response"), "html_chart": html_chart})
+                    else:
+                        st.session_state.messages.append({"role": "assistant", "content": res.get("text_response")})
+                        
+                except Exception as e:
+                    st.error(f"Analysis failed. Error details: {e}")
