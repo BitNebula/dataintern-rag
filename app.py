@@ -56,10 +56,12 @@ with st.sidebar:
 def get_best_model(method='generateContent'):
     """Dynamically find a model supporting the required method."""
     try:
-        models = [m for m in genai.list_models() if method in m.supported_generation_methods]
-        return models[0].name if models else 'gemini-1.5-flash'
+        models = [m.name for m in genai.list_models() if method in m.supported_generation_methods]
+        for preferred in ['models/gemini-1.5-flash', 'models/gemini-pro', 'gemini-pro']:
+            if preferred in models: return preferred
+        return models[0] if models else 'gemini-pro'
     except:
-        return 'gemini-1.5-flash'
+        return 'gemini-pro'
 
 def cosine_similarity(a, b):
     norm_a, norm_b = np.linalg.norm(a), np.linalg.norm(b)
@@ -172,6 +174,7 @@ if fetch_btn:
             
         st.session_state.processed_files = processed_names
         status.update(label="✅ Ingestion Complete!", state="complete")
+        time.sleep(1)
         st.rerun()
 
 # --- CHAT ---
@@ -180,7 +183,7 @@ for message in st.session_state.messages:
         st.markdown(message["content"])
         if message.get("html_chart"): components.html(message["html_chart"], height=500)
 
-if user_query := st.chat_input("Ask DataIntern..."):
+if user_query := st.chat_input("Ask DataIntern to chart your data..."):
     with st.chat_message("user"): st.markdown(user_query)
     st.session_state.messages.append({"role": "user", "content": user_query})
     
@@ -191,24 +194,81 @@ if user_query := st.chat_input("Ask DataIntern..."):
         scored = sorted([(cosine_similarity(query_emb, i["vector"]), i) for i in st.session_state.vectorstore], key=lambda x: x[0], reverse=True)[:20]
         context = "\n".join([f"[{i['source']}]: {i['text']}" for s, i in scored])
         
+        system_prompt = f"""
+        You are DataIntern, a RAG engine.
+        Answer based ONLY on the context. If not found, say "I don't see that in your files."
+        Format output strictly as JSON.
+
+        If text answer:
+        {{
+            "requires_chart": false,
+            "text_response": "Your factual answer here."
+        }}
+
+        If user asks for a chart:
+        {{
+            "requires_chart": true,
+            "text_response": "Here is the chart:",
+            "chart_data": {{
+                "type": "bar", // or line, pie, scatter
+                "title": "Chart Title",
+                "x_label": "X Axis",
+                "y_label": "Y Axis",
+                "x_data": ["Item A", "Item B"],
+                "y_data": [10, 20]
+            }}
+        }}
+
+        CONTEXT:
+        {context}
+        """
+
         with st.chat_message("assistant"):
-            try:
-                model_name = get_best_model(method='generateContent')
-                model = genai.GenerativeModel(model_name)
-                response = model.generate_content(f"Answer using context: {context}\n\nQuery: {user_query}\n\nReturn JSON: {{'requires_chart': bool, 'text_response': str, 'chart_data': dict}}")
-                
-                raw = response.text.strip()
-                res = json.loads(re.search(r'\{.*\}', raw, re.DOTALL).group(0))
-                
-                st.markdown(res.get("text_response"))
-                if res.get("requires_chart"):
-                    c = res.get("chart_data", {})
-                    fig = go.Figure()
-                    if c.get('type') == 'bar': fig.add_trace(go.Bar(x=c['x_data'], y=c['y_data']))
-                    fig.update_layout(title=c.get('title'))
-                    st.components.v1.html(fig.to_html(full_html=True, include_plotlyjs='cdn'), height=500)
-                    st.session_state.messages.append({"role": "assistant", "content": res.get("text_response"), "html_chart": fig.to_html()})
-                else:
-                    st.session_state.messages.append({"role": "assistant", "content": res.get("text_response")})
-            except Exception as e:
-                st.error(f"Analysis failed: {e}")
+            with st.spinner("Analyzing data and generating insights..."):
+                try:
+                    # DUAL-ENGINE FALLBACK: Try Flash first, silently switch to Pro if 404 error occurs
+                    try:
+                        model = genai.GenerativeModel('models/gemini-1.5-flash')
+                        response = model.generate_content([system_prompt, f"User Query: {user_query}"])
+                    except Exception:
+                        model = genai.GenerativeModel('gemini-pro') # Rock-solid legacy fallback
+                        response = model.generate_content([system_prompt, f"User Query: {user_query}"])
+                    
+                    # BULLETPROOF JSON PARSING
+                    raw = response.text.strip()
+                    raw = raw.replace('```json', '').replace('```', '').strip()
+                    
+                    try:
+                        res = json.loads(raw)
+                    except Exception:
+                        # If raw parse fails, use Regex rescue
+                        match = re.search(r'\{.*\}', raw, re.DOTALL)
+                        if match:
+                            res = json.loads(match.group(0))
+                        else:
+                            res = {"requires_chart": False, "text_response": raw} # Emergency text fallback
+                    
+                    # RENDER RESPONSE
+                    st.markdown(res.get("text_response", "Here are your insights:"))
+                    
+                    if res.get("requires_chart") and res.get("chart_data"):
+                        c = res.get("chart_data", {})
+                        fig = go.Figure()
+                        ctype = c.get('type', 'bar')
+                        x_val, y_val = c.get('x_data', []), c.get('y_data', [])
+                        
+                        if ctype == 'bar': fig.add_trace(go.Bar(x=x_val, y=y_val))
+                        elif ctype == 'line': fig.add_trace(go.Scatter(x=x_val, y=y_val, mode='lines+markers'))
+                        elif ctype == 'pie': fig.add_trace(go.Pie(labels=x_val, values=y_val))
+                        elif ctype == 'scatter': fig.add_trace(go.Scatter(x=x_val, y=y_val, mode='markers'))
+                        
+                        fig.update_layout(title=c.get('title', 'Data Insights'), xaxis_title=c.get('x_label', ''), yaxis_title=c.get('y_label', ''))
+                        html_chart = fig.to_html(full_html=True, include_plotlyjs='cdn')
+                        
+                        st.components.v1.html(html_chart, height=500)
+                        st.session_state.messages.append({"role": "assistant", "content": res.get("text_response"), "html_chart": html_chart})
+                    else:
+                        st.session_state.messages.append({"role": "assistant", "content": res.get("text_response")})
+                        
+                except Exception as e:
+                    st.error(f"Analysis failed: Could not render AI response. Error details: {e}")
