@@ -195,31 +195,30 @@ if user_query := st.chat_input("Ask DataIntern to chart your data..."):
         context = "\n".join([f"[{i['source']}]: {i['text']}" for s, i in scored])
         
         system_prompt = f"""
-        You are DataIntern, a RAG engine.
-        Answer based ONLY on the context. If not found, say "I don't see that in your files."
-        Format output strictly as JSON.
-
-        If text answer:
+        You are DataIntern, a strict RAG data analyst.
+        CRITICAL INSTRUCTION: You MUST format your entire response as a single, valid JSON object. NEVER output plain conversational text.
+        
+        If the user asks a plain text question, use this exact format:
         {{
             "requires_chart": false,
-            "text_response": "Your factual answer here."
+            "text_response": "Factual answer based on context."
         }}
 
-        If user asks for a chart:
+        If the user asks for a chart, graph, or says "anything relevant", you MUST extract and aggregate numerical data from the context (for example, sum up amounts by Owner, or count Deals by Stage) and use this exact format:
         {{
             "requires_chart": true,
-            "text_response": "Here is the chart:",
+            "text_response": "Here is the visualized data:",
             "chart_data": {{
-                "type": "bar", // or line, pie, scatter
-                "title": "Chart Title",
-                "x_label": "X Axis",
-                "y_label": "Y Axis",
-                "x_data": ["Item A", "Item B"],
-                "y_data": [10, 20]
+                "type": "bar",
+                "title": "Descriptive Chart Title",
+                "x_label": "X Axis Label",
+                "y_label": "Y Axis Label",
+                "x_data": ["Category A", "Category B", "Category C"],
+                "y_data": [10, 50, 25]
             }}
         }}
 
-        CONTEXT:
+        CONTEXT DATA:
         {context}
         """
 
