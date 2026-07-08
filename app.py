@@ -72,10 +72,10 @@ if not st.session_state.data_loaded:
         except Exception as e:
             st.error(f"Failed to connect to Google Drive: {e}")
             st.stop()
-            
+
         full_text_corpus = ""
         processed = []
-        
+
         for f in files:
             st.write(f"📥 Pulling & Reading: {f['name']}")
             dl_url = f"https://www.googleapis.com/drive/v3/files/{f['id']}?alt=media&key={GOOGLE_DRIVE_API_KEY}"
@@ -88,7 +88,7 @@ if not st.session_state.data_loaded:
                         processed.append(f['name'])
             except Exception:
                 pass
-                
+
         st.session_state.master_context = full_text_corpus
         st.session_state.processed_files = processed
         st.session_state.data_loaded = True
@@ -105,24 +105,24 @@ with st.sidebar:
         st.rerun()
     if st.session_state.processed_files:
         st.success(f"{len(st.session_state.processed_files)} files active in memory.")
-        for f in st.session_state.processed_files: 
+        for f in st.session_state.processed_files:
             st.text(f"• {f}")
 
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
-        if msg.get("html_chart"): 
+        if msg.get("html_chart"):
             components.html(msg["html_chart"], height=500)
 
 if user_query := st.chat_input("Ask a question or request a chart..."):
     st.session_state.messages.append({"role": "user", "content": user_query})
-    with st.chat_message("user"): 
+    with st.chat_message("user"):
         st.markdown(user_query)
-        
+
     with st.chat_message("assistant"):
         status_box = st.empty()
         status_box.info("🧠 Processing complete dataset context...")
-        
+
         prompt = f"""
         You are DataIntern, a data analyst. Use ONLY the provided context. Output ONLY valid JSON.
         Format:
@@ -133,38 +133,41 @@ if user_query := st.chat_input("Ask a question or request a chart..."):
         }}
         CONTEXT:
         {st.session_state.master_context}
-        
+
         QUERY: {user_query}
         """
-        
+
         try:
-            model = genai.GenerativeModel("gemini-1.5-flash")
+            # FIX: gemini-1.5-flash was fully retired (all 1.0 and 1.5 Gemini
+            # models now return 404 on generateContent). gemini-2.5-flash is
+            # the current stable, GA replacement.
+            model = genai.GenerativeModel("gemini-2.5-flash")
             raw_res = model.generate_content(prompt).text.strip().replace('```json', '').replace('```', '').strip()
-            
+
             try:
                 res = json.loads(raw_res)
             except Exception:
                 match = re.search(r'\{.*\}', raw_res, re.DOTALL)
                 res = json.loads(match.group(0)) if match else {"requires_chart": False, "text_response": raw_res}
-                
+
             status_box.empty()
             st.markdown(res.get("text_response", ""))
-            
+
             html_chart = None
             if res.get("requires_chart") and res.get("chart_data"):
                 c = res["chart_data"]
                 fig = go.Figure()
                 ctype, x_val, y_val = c.get('type', 'bar'), c.get('x_data', []), c.get('y_data', [])
-                
+
                 if ctype == 'bar': fig.add_trace(go.Bar(x=x_val, y=y_val))
                 elif ctype == 'line': fig.add_trace(go.Scatter(x=x_val, y=y_val, mode='lines+markers'))
                 elif ctype == 'pie': fig.add_trace(go.Pie(labels=x_val, values=y_val))
                 elif ctype == 'scatter': fig.add_trace(go.Scatter(x=x_val, y=y_val, mode='markers'))
-                
+
                 fig.update_layout(title=c.get('title', ''), xaxis_title=c.get('x_label', ''), yaxis_title=c.get('y_label', ''))
                 html_chart = fig.to_html(full_html=True, include_plotlyjs='cdn')
                 components.html(html_chart, height=500)
-                
+
             st.session_state.messages.append({"role": "assistant", "content": res.get("text_response", ""), "html_chart": html_chart})
         except Exception as e:
             status_box.empty()
