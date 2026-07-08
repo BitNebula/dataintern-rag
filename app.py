@@ -36,29 +36,27 @@ if "processed_files" not in st.session_state:
     st.session_state.processed_files = []
 
 def embed_text_safe(text, task_type):
-    """Uses hardcoded, proven stable models. Exposes exact error if it fails."""
+    """Strictly uses the primary active model and patiently handles rate limits."""
     last_error = None
-    for model_name in ["models/text-embedding-004", "models/embedding-001"]:
-        for attempt in range(3):
-            try:
-                return genai.embed_content(model=model_name, content=text, task_type=task_type)['embedding']
-            except Exception as e:
-                last_error = e
-                time.sleep(3)
-    raise Exception(f"Model {model_name} failed. Error: {str(last_error)}")
+    for attempt in range(6):
+        try:
+            return genai.embed_content(model="models/text-embedding-004", content=text, task_type=task_type)['embedding']
+        except Exception as e:
+            last_error = e
+            time.sleep(5) # Wait 5 seconds to clear API speed limits
+    raise Exception(f"API Limit Reached. Last Error: {str(last_error)}")
 
 def chat_safe(prompt):
-    """Uses hardcoded, proven stable models. Exposes exact error if it fails."""
+    """Strictly uses the primary chat model and patiently handles rate limits."""
     last_error = None
-    for model_name in ["gemini-1.5-flash", "gemini-pro"]:
-        for attempt in range(3):
-            try:
-                model = genai.GenerativeModel(model_name)
-                return model.generate_content(prompt).text
-            except Exception as e:
-                last_error = e
-                time.sleep(3)
-    raise Exception(f"Model {model_name} failed. Error: {str(last_error)}")
+    for attempt in range(6):
+        try:
+            model = genai.GenerativeModel("gemini-1.5-flash")
+            return model.generate_content(prompt).text
+        except Exception as e:
+            last_error = e
+            time.sleep(5) # Wait 5 seconds to clear API speed limits
+    raise Exception(f"API Limit Reached. Last Error: {str(last_error)}")
 
 def cosine_similarity(a, b):
     norm = np.linalg.norm(a) * np.linalg.norm(b)
@@ -147,7 +145,7 @@ if not st.session_state.data_loaded:
                     pass # Silently skip chunk if it completely fails
                 
                 progress_bar.progress((i + 1) / len(all_chunks))
-                time.sleep(3) # Steady pace to avoid rate limits
+                time.sleep(4.5) # Mathematically guarantees we stay under Google's 15 Requests Per Minute limit
             
             st.session_state.processed_files = processed
             
