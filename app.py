@@ -35,33 +35,30 @@ if "messages" not in st.session_state:
 if "processed_files" not in st.session_state:
     st.session_state.processed_files = []
 
-# DYNAMIC MODEL MATCHER - Bulletproof fix to stop 404 infinite loops
-if "sys_embed_model" not in st.session_state:
-    try:
-        st.session_state.sys_embed_model = [m.name for m in genai.list_models() if 'embedContent' in m.supported_generation_methods][0]
-        st.session_state.sys_chat_model = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods][0]
-    except Exception:
-        st.session_state.sys_embed_model = "models/embedding-001"
-        st.session_state.sys_chat_model = "models/gemini-1.5-flash"
-
 def embed_text_safe(text, task_type):
-    """Safely embeds text without locking up the app with massive sleep timers."""
-    for attempt in range(2):  
-        try:
-            return genai.embed_content(model=st.session_state.sys_embed_model, content=text, task_type=task_type)['embedding']
-        except Exception:
-            time.sleep(2)
-    return None # Return None gracefully instead of crashing into a retry loop
+    """Uses hardcoded, proven stable models. Exposes exact error if it fails."""
+    last_error = None
+    for model_name in ["models/text-embedding-004", "models/embedding-001"]:
+        for attempt in range(3):
+            try:
+                return genai.embed_content(model=model_name, content=text, task_type=task_type)['embedding']
+            except Exception as e:
+                last_error = e
+                time.sleep(3)
+    raise Exception(f"Model {model_name} failed. Error: {str(last_error)}")
 
 def chat_safe(prompt):
-    """Safely chats without locking up the app."""
-    for attempt in range(3): 
-        try:
-            model = genai.GenerativeModel(st.session_state.sys_chat_model)
-            return model.generate_content(prompt).text
-        except Exception:
-            time.sleep(3) 
-    raise Exception("Google AI API free quota reached. Please wait a moment and try again.")
+    """Uses hardcoded, proven stable models. Exposes exact error if it fails."""
+    last_error = None
+    for model_name in ["gemini-1.5-flash", "gemini-pro"]:
+        for attempt in range(3):
+            try:
+                model = genai.GenerativeModel(model_name)
+                return model.generate_content(prompt).text
+            except Exception as e:
+                last_error = e
+                time.sleep(3)
+    raise Exception(f"Model {model_name} failed. Error: {str(last_error)}")
 
 def cosine_similarity(a, b):
     norm = np.linalg.norm(a) * np.linalg.norm(b)
@@ -143,12 +140,14 @@ if not st.session_state.data_loaded:
             progress_bar = st.progress(0)
             
             for i, chunk in enumerate(all_chunks):
-                emb = embed_text_safe(chunk['text'], "retrieval_document")
-                if emb: # Safely append only if the embedding succeeded
+                try:
+                    emb = embed_text_safe(chunk['text'], "retrieval_document")
                     st.session_state.vectorstore.append({"vector": emb, "text": chunk['text'], "source": chunk['source']})
+                except Exception:
+                    pass # Silently skip chunk if it completely fails
                 
                 progress_bar.progress((i + 1) / len(all_chunks))
-                time.sleep(2) # Relaxed, constant 2-second pace. 12 chunks = 24 seconds max.
+                time.sleep(3) # Steady pace to avoid rate limits
             
             st.session_state.processed_files = processed
             
@@ -189,8 +188,6 @@ if user_query := st.chat_input("E.g., 'Chart the pipeline amounts by owner'"):
         
         try:
             query_emb = embed_text_safe(user_query, "retrieval_query")
-            if not query_emb:
-                raise Exception("Failed to embed query. API might be unreachable right now.")
                 
             scored = [(cosine_similarity(query_emb, item["vector"]), item) for item in st.session_state.vectorstore]
             scored.sort(key=lambda x: x[0], reverse=True)
