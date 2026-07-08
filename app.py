@@ -35,26 +35,33 @@ if "messages" not in st.session_state:
 if "processed_files" not in st.session_state:
     st.session_state.processed_files = []
 
+# DYNAMIC MODEL MATCHER - Bulletproof fix to stop 404 infinite loops
+if "sys_embed_model" not in st.session_state:
+    try:
+        st.session_state.sys_embed_model = [m.name for m in genai.list_models() if 'embedContent' in m.supported_generation_methods][0]
+        st.session_state.sys_chat_model = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods][0]
+    except Exception:
+        st.session_state.sys_embed_model = "models/embedding-001"
+        st.session_state.sys_chat_model = "models/gemini-1.5-flash"
+
 def embed_text_safe(text, task_type):
-    """Tries primary embedding model, falls back to legacy if server rejects it."""
-    for model_name in ["models/text-embedding-004", "models/embedding-001"]:
-        for attempt in range(4):  
-            try:
-                return genai.embed_content(model=model_name, content=text, task_type=task_type)['embedding']
-            except Exception:
-                time.sleep(16) # Wait 16s (4 attempts = 64s) to guarantee the 1-minute quota resets
-    raise Exception("Google AI API free quota reached. Please wait 1 minute and try again.")
+    """Safely embeds text without locking up the app with massive sleep timers."""
+    for attempt in range(2):  
+        try:
+            return genai.embed_content(model=st.session_state.sys_embed_model, content=text, task_type=task_type)['embedding']
+        except Exception:
+            time.sleep(2)
+    return None # Return None gracefully instead of crashing into a retry loop
 
 def chat_safe(prompt):
-    """Tries the fastest chat model, falls back to stable legacy if needed."""
-    for model_name in ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]:
-        for attempt in range(4): 
-            try:
-                model = genai.GenerativeModel(model_name)
-                return model.generate_content(prompt).text
-            except Exception:
-                time.sleep(16) # Wait 16s (4 attempts = 64s) to guarantee the 1-minute quota resets
-    raise Exception("Google AI API free quota reached. Please wait 1 minute and try again.")
+    """Safely chats without locking up the app."""
+    for attempt in range(3): 
+        try:
+            model = genai.GenerativeModel(st.session_state.sys_chat_model)
+            return model.generate_content(prompt).text
+        except Exception:
+            time.sleep(3) 
+    raise Exception("Google AI API free quota reached. Please wait a moment and try again.")
 
 def cosine_similarity(a, b):
     norm = np.linalg.norm(a) * np.linalg.norm(b)
@@ -85,7 +92,6 @@ def download_drive_file(file_id, api_key):
             return None
 
 def chunk_text_safe(text, source_name, max_words=800):
-    """Smart chunking: Groups text to drastically reduce API calls. Increased block size for efficiency."""
     chunks = []
     words = str(text).split()
     for i in range(0, len(words), max_words):
@@ -93,13 +99,11 @@ def chunk_text_safe(text, source_name, max_words=800):
     return chunks
 
 def parse_file_content(file_name, file_bytes):
-    """Parses files and smartly groups content to prevent API overload."""
     chunks = []
     ext = file_name.split('.')[-1].lower()
     try:
         if ext == 'csv':
             df = pd.read_csv(io.BytesIO(file_bytes))
-            # Group all rows into large string blocks instead of 1 row = 1 chunk
             chunks.extend(chunk_text_safe(df.to_csv(index=False), file_name))
         elif ext in ['xlsx', 'xls']:
             xl = pd.ExcelFile(io.BytesIO(file_bytes))
@@ -136,18 +140,15 @@ if not st.session_state.data_loaded:
                     processed.append(f['name'])
             
             st.write(f"🧠 Generating AI Memory for {len(all_chunks)} data chunks...")
-            progress_bar = st.progress(0) # Visual progress tracking
+            progress_bar = st.progress(0)
             
             for i, chunk in enumerate(all_chunks):
-                try:
-                    emb = embed_text_safe(chunk['text'], "retrieval_document")
+                emb = embed_text_safe(chunk['text'], "retrieval_document")
+                if emb: # Safely append only if the embedding succeeded
                     st.session_state.vectorstore.append({"vector": emb, "text": chunk['text'], "source": chunk['source']})
-                    time.sleep(4) # Intentional pace: 1 request every 4 seconds ensures we strictly obey 15 RPM
-                except Exception:
-                    pass # Skip chunk gracefully if API completely rejects
                 
-                # Update progress bar
                 progress_bar.progress((i + 1) / len(all_chunks))
+                time.sleep(2) # Relaxed, constant 2-second pace. 12 chunks = 24 seconds max.
             
             st.session_state.processed_files = processed
             
@@ -187,15 +188,14 @@ if user_query := st.chat_input("E.g., 'Chart the pipeline amounts by owner'"):
         status_box.info("🧠 Searching database & analyzing data...")
         
         try:
-            # 1. Embed user query
             query_emb = embed_text_safe(user_query, "retrieval_query")
-            
-            # 2. Retrieve top-k blocks
+            if not query_emb:
+                raise Exception("Failed to embed query. API might be unreachable right now.")
+                
             scored = [(cosine_similarity(query_emb, item["vector"]), item) for item in st.session_state.vectorstore]
             scored.sort(key=lambda x: x[0], reverse=True)
             context_str = "\n".join([f"[{i['source']}]: {i['text']}" for score, i in scored[:15]])
             
-            # 3. Construct prompt
             prompt = f"""
             You are DataIntern, a strict data analyst. Use ONLY the provided context.
             Output ONLY raw JSON. No markdown ticks, no greeting.
@@ -219,11 +219,9 @@ if user_query := st.chat_input("E.g., 'Chart the pipeline amounts by owner'"):
             USER QUERY: {user_query}
             """
             
-            # 4. Generate Answer
             status_box.info("📊 Generating visualization and insights...")
             raw_response = chat_safe(prompt)
             
-            # 5. Extract JSON safely
             raw = raw_response.strip().replace('```json', '').replace('```', '').strip()
             try:
                 res = json.loads(raw)
@@ -235,7 +233,6 @@ if user_query := st.chat_input("E.g., 'Chart the pipeline amounts by owner'"):
             status_box.empty()
             st.markdown(res.get("text_response", "Here is what I found:"))
             
-            # 6. Render Chart if needed
             html_chart = None
             if res.get("requires_chart") and res.get("chart_data"):
                 c = res.get("chart_data")
